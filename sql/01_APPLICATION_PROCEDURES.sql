@@ -1,0 +1,273 @@
+USE [CREATOR_SERVICE]
+GO
+
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+-- ============================================================
+-- USP_CREATOR_APP_SAVE_DRAFT
+-- Upsert a creator application in DRAFT / REQUEST_INFO state.
+-- ============================================================
+CREATE OR ALTER PROCEDURE [dbo].[USP_CREATOR_APP_SAVE_DRAFT]
+(
+    @USERID             BIGINT,
+    @DISPLAYNAMEPREF    NVARCHAR(200)  = NULL,
+    @BIODRAFT           NVARCHAR(2000) = NULL,
+    @MOTIVATION         NVARCHAR(2000) = NULL,
+    @SAMPLEOUTLINE      NVARCHAR(MAX)  = NULL,
+    @PORTFOLIOLINKS     NVARCHAR(2000) = NULL,
+    @AGREEMENTACCEPTED  BIT            = 0
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+        DECLARE @APPLICATIONID BIGINT;
+
+        SELECT @APPLICATIONID = APPLICATIONID
+        FROM dbo.CREATOR_APPLICATION
+        WHERE USERID = @USERID
+          AND ACTIVE = 1
+          AND STATUS IN ('DRAFT', 'REQUEST_INFO');
+
+        IF @APPLICATIONID IS NOT NULL
+        BEGIN
+            UPDATE dbo.CREATOR_APPLICATION
+            SET DISPLAYNAMEPREF   = @DISPLAYNAMEPREF,
+                BIODRAFT          = @BIODRAFT,
+                MOTIVATION        = @MOTIVATION,
+                SAMPLEOUTLINE     = @SAMPLEOUTLINE,
+                PORTFOLIOLINKS    = @PORTFOLIOLINKS,
+                AGREEMENTACCEPTED = @AGREEMENTACCEPTED,
+                UPDATEDDATE       = SYSUTCDATETIME()
+            WHERE APPLICATIONID = @APPLICATIONID;
+        END
+        ELSE
+        BEGIN
+            INSERT INTO dbo.CREATOR_APPLICATION
+            (
+                USERID, STATUS, DISPLAYNAMEPREF, BIODRAFT, MOTIVATION,
+                SAMPLEOUTLINE, PORTFOLIOLINKS, AGREEMENTACCEPTED,
+                CREATEDDATE, UPDATEDDATE, ACTIVE
+            )
+            VALUES
+            (
+                @USERID, 'DRAFT', @DISPLAYNAMEPREF, @BIODRAFT, @MOTIVATION,
+                @SAMPLEOUTLINE, @PORTFOLIOLINKS, @AGREEMENTACCEPTED,
+                SYSUTCDATETIME(), SYSUTCDATETIME(), 1
+            );
+
+            SET @APPLICATIONID = SCOPE_IDENTITY();
+        END
+
+        SELECT 1 AS SUCCESS, @APPLICATIONID AS APPLICATIONID, 'Draft saved' AS MESSAGE;
+    END TRY
+    BEGIN CATCH
+        SELECT 0 AS SUCCESS, NULL AS APPLICATIONID, ERROR_MESSAGE() AS MESSAGE;
+    END CATCH
+END
+GO
+
+-- ============================================================
+-- USP_CREATOR_APP_SUBMIT
+-- Submit an existing draft / request-info application.
+-- ============================================================
+CREATE OR ALTER PROCEDURE [dbo].[USP_CREATOR_APP_SUBMIT]
+(
+    @USERID                BIGINT,
+    @AUTOELIGIBILITYJSON   NVARCHAR(MAX) = NULL
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+        DECLARE @APPLICATIONID BIGINT;
+        DECLARE @AGREED BIT;
+
+        SELECT @APPLICATIONID = APPLICATIONID,
+               @AGREED = AGREEMENTACCEPTED
+        FROM dbo.CREATOR_APPLICATION
+        WHERE USERID = @USERID
+          AND ACTIVE = 1
+          AND STATUS IN ('DRAFT', 'REQUEST_INFO');
+
+        IF @APPLICATIONID IS NULL
+        BEGIN
+            SELECT 0 AS SUCCESS, NULL AS APPLICATIONID,
+                   'No active draft or request-info application found' AS MESSAGE;
+            RETURN;
+        END
+
+        IF @AGREED != 1
+        BEGIN
+            SELECT 0 AS SUCCESS, @APPLICATIONID AS APPLICATIONID,
+                   'Agreement must be accepted before submitting' AS MESSAGE;
+            RETURN;
+        END
+
+        UPDATE dbo.CREATOR_APPLICATION
+        SET STATUS               = 'SUBMITTED',
+            SUBMITTEDAT          = SYSUTCDATETIME(),
+            AUTOELIGIBILITYJSON  = @AUTOELIGIBILITYJSON,
+            UPDATEDDATE          = SYSUTCDATETIME()
+        WHERE APPLICATIONID = @APPLICATIONID;
+
+        SELECT 1 AS SUCCESS, @APPLICATIONID AS APPLICATIONID, 'Application submitted' AS MESSAGE;
+    END TRY
+    BEGIN CATCH
+        SELECT 0 AS SUCCESS, NULL AS APPLICATIONID, ERROR_MESSAGE() AS MESSAGE;
+    END CATCH
+END
+GO
+
+-- ============================================================
+-- USP_CREATOR_APP_GET_BY_USER
+-- Return the latest active application for a user.
+-- ============================================================
+CREATE OR ALTER PROCEDURE [dbo].[USP_CREATOR_APP_GET_BY_USER]
+(
+    @USERID BIGINT
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT TOP 1
+        APPLICATIONID, USERID, STATUS, DISPLAYNAMEPREF, BIODRAFT,
+        MOTIVATION, SAMPLEOUTLINE, PORTFOLIOLINKS, AGREEMENTACCEPTED,
+        AUTOELIGIBILITYJSON, REVIEWEDBYUSERID, REVIEWEDAT, REVIEWNOTE,
+        REJECTIONREASON, SUBMITTEDAT, CREATEDDATE, UPDATEDDATE, ACTIVE
+    FROM dbo.CREATOR_APPLICATION
+    WHERE USERID = @USERID AND ACTIVE = 1
+    ORDER BY CREATEDDATE DESC;
+END
+GO
+
+-- ============================================================
+-- USP_CREATOR_APP_GET_BY_ID
+-- Return a single application by ID (admin use).
+-- ============================================================
+CREATE OR ALTER PROCEDURE [dbo].[USP_CREATOR_APP_GET_BY_ID]
+(
+    @APPLICATIONID BIGINT
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT
+        APPLICATIONID, USERID, STATUS, DISPLAYNAMEPREF, BIODRAFT,
+        MOTIVATION, SAMPLEOUTLINE, PORTFOLIOLINKS, AGREEMENTACCEPTED,
+        AUTOELIGIBILITYJSON, REVIEWEDBYUSERID, REVIEWEDAT, REVIEWNOTE,
+        REJECTIONREASON, SUBMITTEDAT, CREATEDDATE, UPDATEDDATE, ACTIVE
+    FROM dbo.CREATOR_APPLICATION
+    WHERE APPLICATIONID = @APPLICATIONID;
+END
+GO
+
+-- ============================================================
+-- USP_CREATOR_APP_LIST_PENDING
+-- Paginated list of submitted / under-review applications.
+-- ============================================================
+CREATE OR ALTER PROCEDURE [dbo].[USP_CREATOR_APP_LIST_PENDING]
+(
+    @PAGESIZE   INT = 20,
+    @PAGENUMBER INT = 1
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @OFFSET INT = (@PAGENUMBER - 1) * @PAGESIZE;
+
+    ;WITH Base AS (
+        SELECT
+            APPLICATIONID, USERID, STATUS, DISPLAYNAMEPREF, BIODRAFT,
+            MOTIVATION, SAMPLEOUTLINE, PORTFOLIOLINKS, AGREEMENTACCEPTED,
+            AUTOELIGIBILITYJSON, REVIEWEDBYUSERID, REVIEWEDAT, REVIEWNOTE,
+            REJECTIONREASON, SUBMITTEDAT, CREATEDDATE, UPDATEDDATE, ACTIVE
+        FROM dbo.CREATOR_APPLICATION
+        WHERE STATUS IN ('SUBMITTED', 'UNDER_REVIEW') AND ACTIVE = 1
+    )
+    SELECT
+        COUNT(*) OVER() AS TOTALCOUNT,
+        APPLICATIONID, USERID, STATUS, DISPLAYNAMEPREF, BIODRAFT,
+        MOTIVATION, SAMPLEOUTLINE, PORTFOLIOLINKS, AGREEMENTACCEPTED,
+        AUTOELIGIBILITYJSON, REVIEWEDBYUSERID, REVIEWEDAT, REVIEWNOTE,
+        REJECTIONREASON, SUBMITTEDAT, CREATEDDATE, UPDATEDDATE, ACTIVE
+    FROM Base
+    ORDER BY SUBMITTEDAT ASC
+    OFFSET @OFFSET ROWS FETCH NEXT @PAGESIZE ROWS ONLY;
+END
+GO
+
+-- ============================================================
+-- USP_CREATOR_APP_REVIEW
+-- Admin action: approve, reject, or request info on application.
+-- ============================================================
+CREATE OR ALTER PROCEDURE [dbo].[USP_CREATOR_APP_REVIEW]
+(
+    @APPLICATIONID     BIGINT,
+    @ACTION            NVARCHAR(20),
+    @REVIEWEDBYUSERID  BIGINT,
+    @REVIEWNOTE        NVARCHAR(2000) = NULL,
+    @REJECTIONREASON   NVARCHAR(2000) = NULL
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+        DECLARE @CURRENTSTATUS NVARCHAR(30);
+
+        SELECT @CURRENTSTATUS = STATUS
+        FROM dbo.CREATOR_APPLICATION
+        WHERE APPLICATIONID = @APPLICATIONID AND ACTIVE = 1;
+
+        IF @CURRENTSTATUS IS NULL
+        BEGIN
+            SELECT 0 AS SUCCESS, NULL AS STATUS, 'Application not found' AS MESSAGE;
+            RETURN;
+        END
+
+        IF @CURRENTSTATUS NOT IN ('SUBMITTED', 'UNDER_REVIEW')
+        BEGIN
+            SELECT 0 AS SUCCESS, @CURRENTSTATUS AS STATUS,
+                   'Application is not in a reviewable state' AS MESSAGE;
+            RETURN;
+        END
+
+        IF @ACTION NOT IN ('APPROVE', 'REJECT', 'REQUEST_INFO')
+        BEGIN
+            SELECT 0 AS SUCCESS, @CURRENTSTATUS AS STATUS,
+                   'Invalid action. Use APPROVE, REJECT, or REQUEST_INFO' AS MESSAGE;
+            RETURN;
+        END
+
+        DECLARE @NEWSTATUS NVARCHAR(30);
+        SET @NEWSTATUS = CASE @ACTION
+            WHEN 'APPROVE'      THEN 'APPROVED'
+            WHEN 'REJECT'       THEN 'REJECTED'
+            WHEN 'REQUEST_INFO' THEN 'REQUEST_INFO'
+        END;
+
+        UPDATE dbo.CREATOR_APPLICATION
+        SET STATUS            = @NEWSTATUS,
+            REVIEWEDBYUSERID  = @REVIEWEDBYUSERID,
+            REVIEWEDAT        = SYSUTCDATETIME(),
+            REVIEWNOTE        = @REVIEWNOTE,
+            REJECTIONREASON   = CASE WHEN @ACTION = 'REJECT' THEN @REJECTIONREASON ELSE REJECTIONREASON END,
+            UPDATEDDATE       = SYSUTCDATETIME()
+        WHERE APPLICATIONID = @APPLICATIONID;
+
+        SELECT 1 AS SUCCESS, @NEWSTATUS AS STATUS, 'Review action applied' AS MESSAGE;
+    END TRY
+    BEGIN CATCH
+        SELECT 0 AS SUCCESS, NULL AS STATUS, ERROR_MESSAGE() AS MESSAGE;
+    END CATCH
+END
+GO

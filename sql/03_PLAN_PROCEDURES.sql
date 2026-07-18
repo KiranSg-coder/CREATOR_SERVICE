@@ -1,0 +1,361 @@
+USE [CREATOR_SERVICE]
+GO
+
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+-- ============================================================
+-- USP_STUDY_PLAN_CREATE
+-- Create a new study plan in DRAFT status with version 1.
+-- ============================================================
+CREATE OR ALTER PROCEDURE [dbo].[USP_STUDY_PLAN_CREATE]
+(
+    @CREATORUSERID    BIGINT,
+    @TITLE            NVARCHAR(200),
+    @SHORTDESCRIPTION NVARCHAR(500)  = NULL,
+    @FULLDESCRIPTION  NVARCHAR(MAX)  = NULL,
+    @DURATIONDAYS     INT            = NULL,
+    @CATEGORY         NVARCHAR(50)   = NULL,
+    @DIFFICULTY       NVARCHAR(20)   = NULL,
+    @THEMECOLORHEX    NVARCHAR(20)   = NULL,
+    @COVERFILEUUID    NVARCHAR(100)  = NULL,
+    @BANNERFILEUUID   NVARCHAR(100)  = NULL,
+    @PLANICONEMOJI    NVARCHAR(50)   = NULL
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        DECLARE @PLANID BIGINT;
+
+        INSERT INTO dbo.STUDY_PLAN
+        (
+            CREATORUSERID, TITLE, SHORTDESCRIPTION, FULLDESCRIPTION,
+            DURATIONDAYS, CATEGORY, DIFFICULTY, THEMECOLORHEX,
+            COVERFILEUUID, BANNERFILEUUID, PLANICONEMOJI,
+            PLANSTATUS, CURRENTVERSIONNO, CREATEDDATE, UPDATEDDATE
+        )
+        VALUES
+        (
+            @CREATORUSERID, @TITLE, @SHORTDESCRIPTION, @FULLDESCRIPTION,
+            @DURATIONDAYS, @CATEGORY, @DIFFICULTY, @THEMECOLORHEX,
+            @COVERFILEUUID, @BANNERFILEUUID, @PLANICONEMOJI,
+            'DRAFT', 1, SYSUTCDATETIME(), SYSUTCDATETIME()
+        );
+
+        SET @PLANID = SCOPE_IDENTITY();
+
+        INSERT INTO dbo.STUDY_PLAN_VERSION (PLANID, VERSIONNO, CHANGENOTES, CREATEDDATE)
+        VALUES (@PLANID, 1, 'Initial version', SYSUTCDATETIME());
+
+        COMMIT TRANSACTION;
+
+        SELECT 1 AS SUCCESS, @PLANID AS PLANID, 'Plan created' AS MESSAGE;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+        SELECT 0 AS SUCCESS, NULL AS PLANID, ERROR_MESSAGE() AS MESSAGE;
+    END CATCH
+END
+GO
+
+-- ============================================================
+-- USP_STUDY_PLAN_UPDATE_METADATA
+-- Update plan metadata (owner + draft status required).
+-- ============================================================
+CREATE OR ALTER PROCEDURE [dbo].[USP_STUDY_PLAN_UPDATE_METADATA]
+(
+    @PLANID           BIGINT,
+    @CREATORUSERID    BIGINT,
+    @TITLE            NVARCHAR(200)  = NULL,
+    @SHORTDESCRIPTION NVARCHAR(500)  = NULL,
+    @FULLDESCRIPTION  NVARCHAR(MAX)  = NULL,
+    @DURATIONDAYS     INT            = NULL,
+    @CATEGORY         NVARCHAR(50)   = NULL,
+    @DIFFICULTY       NVARCHAR(20)   = NULL,
+    @THEMECOLORHEX    NVARCHAR(20)   = NULL,
+    @COVERFILEUUID    NVARCHAR(100)  = NULL,
+    @BANNERFILEUUID   NVARCHAR(100)  = NULL,
+    @PLANICONEMOJI    NVARCHAR(50)   = NULL
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+        DECLARE @OWNERID BIGINT;
+        DECLARE @STATUS NVARCHAR(30);
+
+        SELECT @OWNERID = CREATORUSERID, @STATUS = PLANSTATUS
+        FROM dbo.STUDY_PLAN
+        WHERE PLANID = @PLANID;
+
+        IF @OWNERID IS NULL
+        BEGIN
+            SELECT 0 AS SUCCESS, 'Plan not found' AS MESSAGE;
+            RETURN;
+        END
+
+        IF @OWNERID != @CREATORUSERID
+        BEGIN
+            SELECT 0 AS SUCCESS, 'You do not own this plan' AS MESSAGE;
+            RETURN;
+        END
+
+        IF @STATUS != 'DRAFT'
+        BEGIN
+            SELECT 0 AS SUCCESS, 'Plan must be in DRAFT status to edit metadata' AS MESSAGE;
+            RETURN;
+        END
+
+        UPDATE dbo.STUDY_PLAN
+        SET TITLE             = COALESCE(@TITLE, TITLE),
+            SHORTDESCRIPTION  = COALESCE(@SHORTDESCRIPTION, SHORTDESCRIPTION),
+            FULLDESCRIPTION   = COALESCE(@FULLDESCRIPTION, FULLDESCRIPTION),
+            DURATIONDAYS      = COALESCE(@DURATIONDAYS, DURATIONDAYS),
+            CATEGORY          = COALESCE(@CATEGORY, CATEGORY),
+            DIFFICULTY        = COALESCE(@DIFFICULTY, DIFFICULTY),
+            THEMECOLORHEX     = COALESCE(@THEMECOLORHEX, THEMECOLORHEX),
+            COVERFILEUUID     = COALESCE(@COVERFILEUUID, COVERFILEUUID),
+            BANNERFILEUUID    = COALESCE(@BANNERFILEUUID, BANNERFILEUUID),
+            PLANICONEMOJI     = COALESCE(@PLANICONEMOJI, PLANICONEMOJI),
+            UPDATEDDATE       = SYSUTCDATETIME()
+        WHERE PLANID = @PLANID;
+
+        SELECT 1 AS SUCCESS, 'Plan metadata updated' AS MESSAGE;
+    END TRY
+    BEGIN CATCH
+        SELECT 0 AS SUCCESS, ERROR_MESSAGE() AS MESSAGE;
+    END CATCH
+END
+GO
+
+-- ============================================================
+-- USP_STUDY_PLAN_GET_DETAIL
+-- Return plan metadata + days + slots as 3 result sets.
+-- ============================================================
+CREATE OR ALTER PROCEDURE [dbo].[USP_STUDY_PLAN_GET_DETAIL]
+(
+    @PLANID        BIGINT,
+    @CREATORUSERID BIGINT = NULL,
+    @VERSION       INT    = NULL
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @OWNERID BIGINT;
+    DECLARE @EFFECTIVEVERSION INT;
+
+    SELECT @OWNERID = CREATORUSERID,
+           @EFFECTIVEVERSION = CURRENTVERSIONNO
+    FROM dbo.STUDY_PLAN
+    WHERE PLANID = @PLANID;
+
+    IF @OWNERID IS NULL
+    BEGIN
+        SELECT 0 AS SUCCESS, 'Plan not found' AS MESSAGE;
+        RETURN;
+    END
+
+    IF @CREATORUSERID IS NOT NULL AND @OWNERID != @CREATORUSERID
+    BEGIN
+        SELECT 0 AS SUCCESS, 'You do not own this plan' AS MESSAGE;
+        RETURN;
+    END
+
+    IF @VERSION IS NOT NULL
+        SET @EFFECTIVEVERSION = @VERSION;
+
+    -- Result set 1: Plan metadata
+    SELECT
+        P.PLANID, P.CREATORUSERID, P.TITLE, P.SHORTDESCRIPTION,
+        P.FULLDESCRIPTION, P.DURATIONDAYS, P.CATEGORY, P.DIFFICULTY,
+        P.THEMECOLORHEX, P.COVERFILEUUID, P.BANNERFILEUUID,
+        P.PLANICONEMOJI, P.PLANSTATUS, P.CURRENTVERSIONNO,
+        P.PUBLISHEDAT, P.CREATEDDATE, P.UPDATEDDATE
+    FROM dbo.STUDY_PLAN P
+    WHERE P.PLANID = @PLANID;
+
+    -- Result set 2: Days for the requested version
+    SELECT
+        D.DAYID, D.PLANID, D.PLANVERSION, D.DAYNUMBER,
+        D.TITLE, D.NOTES, D.CREATEDDATE, D.UPDATEDDATE
+    FROM dbo.STUDY_PLAN_DAY D
+    WHERE D.PLANID = @PLANID
+      AND D.PLANVERSION = @EFFECTIVEVERSION
+    ORDER BY D.DAYNUMBER ASC;
+
+    -- Result set 3: Slots for those days
+    SELECT
+        S.SLOTID, S.DAYID, S.PLANVERSION, S.SLOTTYPE, S.TITLE,
+        S.DESCRIPTION, S.ESTIMATEDMINUTES, S.SORTORDER,
+        S.TOPICID, S.CONTENTID, S.CONTENTFILEUUID,
+        S.EXTERNALURL, S.QUIZJSON, S.CREATEDDATE, S.UPDATEDDATE
+    FROM dbo.STUDY_PLAN_SLOT S
+    INNER JOIN dbo.STUDY_PLAN_DAY D ON S.DAYID = D.DAYID
+    WHERE D.PLANID = @PLANID
+      AND D.PLANVERSION = @EFFECTIVEVERSION
+    ORDER BY D.DAYNUMBER ASC, S.SORTORDER ASC;
+END
+GO
+
+-- ============================================================
+-- USP_STUDY_PLAN_LIST_BY_CREATOR
+-- List all plans for a creator with aggregate day/slot counts.
+-- ============================================================
+CREATE OR ALTER PROCEDURE [dbo].[USP_STUDY_PLAN_LIST_BY_CREATOR]
+(
+    @CREATORUSERID BIGINT
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT
+        P.PLANID, P.TITLE, P.SHORTDESCRIPTION, P.CATEGORY,
+        P.DIFFICULTY, P.PLANSTATUS, P.CURRENTVERSIONNO,
+        P.DURATIONDAYS, P.PLANICONEMOJI, P.THEMECOLORHEX,
+        P.PUBLISHEDAT, P.CREATEDDATE, P.UPDATEDDATE,
+        ISNULL(DC.DAYCOUNT, 0)  AS DAYCOUNT,
+        ISNULL(SC.SLOTCOUNT, 0) AS SLOTCOUNT
+    FROM dbo.STUDY_PLAN P
+    OUTER APPLY (
+        SELECT COUNT(*) AS DAYCOUNT
+        FROM dbo.STUDY_PLAN_DAY D
+        WHERE D.PLANID = P.PLANID AND D.PLANVERSION = P.CURRENTVERSIONNO
+    ) DC
+    OUTER APPLY (
+        SELECT COUNT(*) AS SLOTCOUNT
+        FROM dbo.STUDY_PLAN_SLOT S
+        INNER JOIN dbo.STUDY_PLAN_DAY D2 ON S.DAYID = D2.DAYID
+        WHERE D2.PLANID = P.PLANID AND D2.PLANVERSION = P.CURRENTVERSIONNO
+    ) SC
+    WHERE P.CREATORUSERID = @CREATORUSERID
+    ORDER BY P.CREATEDDATE DESC;
+END
+GO
+
+-- ============================================================
+-- USP_STUDY_PLAN_ARCHIVE
+-- Archive a plan (creator action).
+-- ============================================================
+CREATE OR ALTER PROCEDURE [dbo].[USP_STUDY_PLAN_ARCHIVE]
+(
+    @PLANID        BIGINT,
+    @CREATORUSERID BIGINT
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+        DECLARE @OWNERID BIGINT;
+
+        SELECT @OWNERID = CREATORUSERID
+        FROM dbo.STUDY_PLAN
+        WHERE PLANID = @PLANID;
+
+        IF @OWNERID IS NULL
+        BEGIN
+            SELECT 0 AS SUCCESS, 'Plan not found' AS MESSAGE;
+            RETURN;
+        END
+
+        IF @OWNERID != @CREATORUSERID
+        BEGIN
+            SELECT 0 AS SUCCESS, 'You do not own this plan' AS MESSAGE;
+            RETURN;
+        END
+
+        UPDATE dbo.STUDY_PLAN
+        SET PLANSTATUS = 'ARCHIVED', UPDATEDDATE = SYSUTCDATETIME()
+        WHERE PLANID = @PLANID;
+
+        SELECT 1 AS SUCCESS, 'Plan archived' AS MESSAGE;
+    END TRY
+    BEGIN CATCH
+        SELECT 0 AS SUCCESS, ERROR_MESSAGE() AS MESSAGE;
+    END CATCH
+END
+GO
+
+-- ============================================================
+-- USP_STUDY_PLAN_SUSPEND
+-- Suspend a plan (admin action, no creator check).
+-- ============================================================
+CREATE OR ALTER PROCEDURE [dbo].[USP_STUDY_PLAN_SUSPEND]
+(
+    @PLANID BIGINT
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+        IF NOT EXISTS (SELECT 1 FROM dbo.STUDY_PLAN WHERE PLANID = @PLANID)
+        BEGIN
+            SELECT 0 AS SUCCESS, 'Plan not found' AS MESSAGE;
+            RETURN;
+        END
+
+        UPDATE dbo.STUDY_PLAN
+        SET PLANSTATUS = 'SUSPENDED', UPDATEDDATE = SYSUTCDATETIME()
+        WHERE PLANID = @PLANID;
+
+        SELECT 1 AS SUCCESS, 'Plan suspended' AS MESSAGE;
+    END TRY
+    BEGIN CATCH
+        SELECT 0 AS SUCCESS, ERROR_MESSAGE() AS MESSAGE;
+    END CATCH
+END
+GO
+
+-- ============================================================
+-- USP_STUDY_PLAN_UNLIST
+-- Unlist a plan (creator action).
+-- ============================================================
+CREATE OR ALTER PROCEDURE [dbo].[USP_STUDY_PLAN_UNLIST]
+(
+    @PLANID        BIGINT,
+    @CREATORUSERID BIGINT
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+        DECLARE @OWNERID BIGINT;
+
+        SELECT @OWNERID = CREATORUSERID
+        FROM dbo.STUDY_PLAN
+        WHERE PLANID = @PLANID;
+
+        IF @OWNERID IS NULL
+        BEGIN
+            SELECT 0 AS SUCCESS, 'Plan not found' AS MESSAGE;
+            RETURN;
+        END
+
+        IF @OWNERID != @CREATORUSERID
+        BEGIN
+            SELECT 0 AS SUCCESS, 'You do not own this plan' AS MESSAGE;
+            RETURN;
+        END
+
+        UPDATE dbo.STUDY_PLAN
+        SET PLANSTATUS = 'UNLISTED', UPDATEDDATE = SYSUTCDATETIME()
+        WHERE PLANID = @PLANID;
+
+        SELECT 1 AS SUCCESS, 'Plan unlisted' AS MESSAGE;
+    END TRY
+    BEGIN CATCH
+        SELECT 0 AS SUCCESS, ERROR_MESSAGE() AS MESSAGE;
+    END CATCH
+END
+GO

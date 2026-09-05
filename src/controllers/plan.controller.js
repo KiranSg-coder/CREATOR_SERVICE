@@ -73,6 +73,31 @@ function planMetadataFromBody(body) {
       body.planIconEmoji != null && String(body.planIconEmoji).trim() !== ""
         ? String(body.planIconEmoji).trim()
         : null,
+    progressionMode: (() => {
+      const raw =
+        body.progressionMode != null
+          ? String(body.progressionMode).trim().toUpperCase()
+          : body.PROGRESSIONMODE != null
+            ? String(body.PROGRESSIONMODE).trim().toUpperCase()
+            : null;
+      if (
+        raw &&
+        ["SELF_PACED", "DAILY_GUIDED", "WEEKLY", "SCHEDULED", "COHORT"].includes(raw)
+      ) {
+        return raw;
+      }
+      return null;
+    })(),
+    unlockTimeLocal:
+      body.unlockTimeLocal != null && String(body.unlockTimeLocal).trim() !== ""
+        ? String(body.unlockTimeLocal).trim()
+        : null,
+    scheduleJson:
+      body.scheduleJson != null
+        ? typeof body.scheduleJson === "string"
+          ? body.scheduleJson
+          : JSON.stringify(body.scheduleJson)
+        : null,
   };
 }
 
@@ -99,7 +124,10 @@ const createPlan = async (req, res) => {
         @THEMECOLORHEX=:themeColorHex,
         @COVERFILEUUID=:coverFileUuid,
         @BANNERFILEUUID=:bannerFileUuid,
-        @PLANICONEMOJI=:planIconEmoji`,
+        @PLANICONEMOJI=:planIconEmoji,
+        @PROGRESSIONMODE=:progressionMode,
+        @UNLOCKTIMELOCAL=:unlockTimeLocal,
+        @SCHEDULEJSON=:scheduleJson`,
       {
         replacements: {
           userId: req.userId,
@@ -113,6 +141,9 @@ const createPlan = async (req, res) => {
           coverFileUuid: meta.coverFileUuid,
           bannerFileUuid: meta.bannerFileUuid,
           planIconEmoji: meta.planIconEmoji,
+          progressionMode: meta.progressionMode || "DAILY_GUIDED",
+          unlockTimeLocal: meta.unlockTimeLocal,
+          scheduleJson: meta.scheduleJson,
         },
         type: QueryTypes.SELECT,
       }
@@ -288,7 +319,10 @@ const updateMetadata = async (req, res) => {
         @THEMECOLORHEX=:themeColorHex,
         @COVERFILEUUID=:coverFileUuid,
         @BANNERFILEUUID=:bannerFileUuid,
-        @PLANICONEMOJI=:planIconEmoji`,
+        @PLANICONEMOJI=:planIconEmoji,
+        @PROGRESSIONMODE=:progressionMode,
+        @UNLOCKTIMELOCAL=:unlockTimeLocal,
+        @SCHEDULEJSON=:scheduleJson`,
       {
         replacements: {
           planId: parseInt(planId, 10),
@@ -303,6 +337,9 @@ const updateMetadata = async (req, res) => {
           coverFileUuid: meta.coverFileUuid,
           bannerFileUuid: meta.bannerFileUuid,
           planIconEmoji: meta.planIconEmoji,
+          progressionMode: meta.progressionMode,
+          unlockTimeLocal: meta.unlockTimeLocal,
+          scheduleJson: meta.scheduleJson,
         },
         type: QueryTypes.SELECT,
       }

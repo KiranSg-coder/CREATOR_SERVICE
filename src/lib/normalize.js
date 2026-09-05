@@ -26,6 +26,9 @@ function planFromRow(r) {
     planIconEmoji: r.PLANICONEMOJI ?? null,
     status: r.PLANSTATUS ?? null,
     planStatus: r.PLANSTATUS ?? null,
+    progressionMode: r.PROGRESSIONMODE ?? 'DAILY_GUIDED',
+    unlockTimeLocal: r.UNLOCKTIMELOCAL ?? null,
+    scheduleJson: r.SCHEDULEJSON ?? null,
     currentVersionNo: toNum(r.CURRENTVERSIONNO),
     publishedAt: r.PUBLISHEDAT ?? null,
     createdAt: r.CREATEDDATE ?? null,
@@ -63,6 +66,12 @@ function dayFromRow(r) {
 
 function slotFromRow(r) {
   if (!r) return null;
+  const requiresReview = Boolean(
+    r.REQUIRESREVIEW === true ||
+      r.REQUIRESREVIEW === 1 ||
+      r.REQUIRESREVIEW === "1" ||
+      r.requiresReview === true
+  );
   return {
     slotId: toNum(r.SLOTID),
     dayId: toNum(r.DAYID),
@@ -78,6 +87,12 @@ function slotFromRow(r) {
     contentFileUuid: r.CONTENTFILEUUID ?? null,
     externalUrl: r.EXTERNALURL ?? null,
     quizJson: r.QUIZJSON ?? null,
+    requiresReview,
+    reviewMethod: r.REVIEWMETHOD ?? r.reviewMethod ?? (requiresReview ? "SPACED" : "NONE"),
+    reviewDifficulty: r.REVIEWDIFFICULTY ?? r.reviewDifficulty ?? null,
+    estimatedRecallMinutes: toNum(r.ESTIMATEDRECALLMINUTES ?? r.estimatedRecallMinutes),
+    reviewTemplate: r.REVIEWTEMPLATE ?? r.reviewTemplate ?? null,
+    reviewConfigJson: r.REVIEWCONFIGJSON ?? r.reviewConfigJson ?? null,
     createdAt: r.CREATEDDATE ?? null,
     updatedAt: r.UPDATEDDATE ?? null,
   };

@@ -155,6 +155,12 @@ const upsertSlot = async (req, res) => {
       contentFileUuid,
       externalUrl,
       quizJson,
+      requiresReview,
+      reviewMethod,
+      reviewDifficulty,
+      estimatedRecallMinutes,
+      reviewTemplate,
+      reviewConfigJson,
     } = req.body;
 
     const quizJsonStr =
@@ -164,12 +170,29 @@ const upsertSlot = async (req, res) => {
           : JSON.stringify(quizJson)
         : null;
 
+    const reviewConfigStr =
+      reviewConfigJson != null
+        ? typeof reviewConfigJson === "string"
+          ? reviewConfigJson
+          : JSON.stringify(reviewConfigJson)
+        : null;
+
     const descriptionValue =
       description != null && String(description).trim() !== ""
         ? String(description)
         : content != null && String(content).trim() !== ""
           ? String(content)
           : null;
+
+    const requiresReviewBit =
+      requiresReview === undefined || requiresReview === null
+        ? null
+        : requiresReview === true ||
+          requiresReview === 1 ||
+          requiresReview === "1" ||
+          requiresReview === "true"
+          ? 1
+          : 0;
 
     const result = await sequelize.query(
       `EXEC USP_STUDY_PLAN_SLOT_UPSERT
@@ -186,7 +209,13 @@ const upsertSlot = async (req, res) => {
         @CONTENTID=:contentId,
         @CONTENTFILEUUID=:contentFileUuid,
         @EXTERNALURL=:externalUrl,
-        @QUIZJSON=:quizJson`,
+        @QUIZJSON=:quizJson,
+        @REQUIRESREVIEW=:requiresReview,
+        @REVIEWMETHOD=:reviewMethod,
+        @REVIEWDIFFICULTY=:reviewDifficulty,
+        @ESTIMATEDRECALLMINUTES=:estimatedRecallMinutes,
+        @REVIEWTEMPLATE=:reviewTemplate,
+        @REVIEWCONFIGJSON=:reviewConfigJson`,
       {
         replacements: {
           planId: parseInt(planId, 10),
@@ -212,6 +241,21 @@ const upsertSlot = async (req, res) => {
               ? String(externalUrl).trim()
               : null,
           quizJson: quizJsonStr,
+          requiresReview: requiresReviewBit,
+          reviewMethod:
+            reviewMethod != null && String(reviewMethod).trim() !== ""
+              ? String(reviewMethod).trim().toUpperCase()
+              : null,
+          reviewDifficulty:
+            reviewDifficulty != null && String(reviewDifficulty).trim() !== ""
+              ? String(reviewDifficulty).trim().toUpperCase()
+              : null,
+          estimatedRecallMinutes: toIntOrNull(estimatedRecallMinutes),
+          reviewTemplate:
+            reviewTemplate != null && String(reviewTemplate).trim() !== ""
+              ? String(reviewTemplate).trim().toUpperCase()
+              : null,
+          reviewConfigJson: reviewConfigStr,
         },
         type: QueryTypes.SELECT,
       }

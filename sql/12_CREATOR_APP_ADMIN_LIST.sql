@@ -1,0 +1,439 @@
+/*
+  Admin list + mark-under-review helpers for Creator Applications.
+  Run on CREATOR_SERVICE after 01_APPLICATION_PROCEDURES.sql / 11_*.sql
+*/
+USE [CREATOR_SERVICE];
+GO
+SET ANSI_NULLS ON;
+GO
+SET QUOTED_IDENTIFIER ON;
+GO
+
+-- ------------------------------------------------------------
+-- USP_CREATOR_APP_SAVE_DRAFT — allow re-apply from REJECTED
+-- ------------------------------------------------------------
+CREATE OR ALTER PROCEDURE [dbo].[USP_CREATOR_APP_SAVE_DRAFT]
+(
+    @USERID             BIGINT,
+    @DISPLAYNAMEPREF    NVARCHAR(200)  = NULL,
+    @BIODRAFT           NVARCHAR(2000) = NULL,
+    @MOTIVATION         NVARCHAR(2000) = NULL,
+    @SAMPLEOUTLINE      NVARCHAR(MAX)  = NULL,
+    @PORTFOLIOLINKS     NVARCHAR(2000) = NULL,
+    @AGREEMENTACCEPTED  BIT            = 0
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+        DECLARE @APPLICATIONID BIGINT;
+        DECLARE @CURRENTSTATUS NVARCHAR(30);
+
+        SELECT TOP 1
+            @APPLICATIONID = APPLICATIONID,
+            @CURRENTSTATUS = STATUS
+        FROM dbo.CREATOR_APPLICATION
+        WHERE USERID = @USERID
+          AND ACTIVE = 1
+          AND STATUS IN (N'DRAFT', N'REQUEST_INFO', N'REJECTED')
+        ORDER BY
+            CASE STATUS
+                WHEN N'DRAFT' THEN 1
+                WHEN N'REQUEST_INFO' THEN 2
+                WHEN N'REJECTED' THEN 3
+            END,
+            CREATEDDATE DESC;
+
+        IF @APPLICATIONID IS NOT NULL
+        BEGIN
+            UPDATE dbo.CREATOR_APPLICATION
+            SET DISPLAYNAMEPREF   = @DISPLAYNAMEPREF,
+                BIODRAFT          = @BIODRAFT,
+                MOTIVATION        = @MOTIVATION,
+                SAMPLEOUTLINE     = @SAMPLEOUTLINE,
+                PORTFOLIOLINKS    = @PORTFOLIOLINKS,
+                AGREEMENTACCEPTED = @AGREEMENTACCEPTED,
+                STATUS            = CASE
+                                      WHEN @CURRENTSTATUS = N'REJECTED' THEN N'DRAFT'
+                                      ELSE STATUS
+                                    END,
+                REJECTIONREASON   = CASE
+                                      WHEN @CURRENTSTATUS = N'REJECTED' THEN NULL
+                                      ELSE REJECTIONREASON
+                                    END,
+                UPDATEDDATE       = SYSUTCDATETIME()
+            WHERE APPLICATIONID = @APPLICATIONID;
+        END
+        ELSE
+        BEGIN
+            -- Block a second active app while one is already in the queue / approved.
+            IF EXISTS (
+                SELECT 1
+                FROM dbo.CREATOR_APPLICATION
+                WHERE USERID = @USERID
+                  AND ACTIVE = 1
+                  AND STATUS IN (N'SUBMITTED', N'UNDER_REVIEW', N'APPROVED')
+            )
+            BEGIN
+                SELECT 0 AS SUCCESS, NULL AS APPLICATIONID,
+                       'An application is already in progress or approved' AS MESSAGE;
+                RETURN;
+            END
+
+            INSERT INTO dbo.CREATOR_APPLICATION
+            (
+                USERID, STATUS, DISPLAYNAMEPREF, BIODRAFT, MOTIVATION,
+                SAMPLEOUTLINE, PORTFOLIOLINKS, AGREEMENTACCEPTED,
+                CREATEDDATE, UPDATEDDATE, ACTIVE
+            )
+            VALUES
+            (
+                @USERID, N'DRAFT', @DISPLAYNAMEPREF, @BIODRAFT, @MOTIVATION,
+                @SAMPLEOUTLINE, @PORTFOLIOLINKS, @AGREEMENTACCEPTED,
+                SYSUTCDATETIME(), SYSUTCDATETIME(), 1
+            );
+
+            SET @APPLICATIONID = SCOPE_IDENTITY();
+        END
+
+        SELECT 1 AS SUCCESS, @APPLICATIONID AS APPLICATIONID, 'Draft saved' AS MESSAGE;
+    END TRY
+    BEGIN CATCH
+        SELECT 0 AS SUCCESS, NULL AS APPLICATIONID, ERROR_MESSAGE() AS MESSAGE;
+    END CATCH
+END
+GO
+
+-- ------------------------------------------------------------
+-- USP_CREATOR_APP_MARK_UNDER_REVIEW
+-- SUBMITTED → UNDER_REVIEW when an admin opens the application.
+-- ------------------------------------------------------------
+CREATE OR ALTER PROCEDURE [dbo].[USP_CREATOR_APP_MARK_UNDER_REVIEW]
+(
+    @APPLICATIONID BIGINT
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    UPDATE dbo.CREATOR_APPLICATION
+    SET STATUS = N'UNDER_REVIEW',
+        UPDATEDDATE = SYSUTCDATETIME()
+    WHERE APPLICATIONID = @APPLICATIONID
+      AND ACTIVE = 1
+      AND STATUS = N'SUBMITTED';
+
+    SELECT
+        APPLICATIONID, USERID, STATUS, DISPLAYNAMEPREF, BIODRAFT,
+        MOTIVATION, SAMPLEOUTLINE, PORTFOLIOLINKS, AGREEMENTACCEPTED,
+        AUTOELIGIBILITYJSON, REVIEWEDBYUSERID, REVIEWEDAT, REVIEWNOTE,
+        REJECTIONREASON, SUBMITTEDAT, CREATEDDATE, UPDATEDDATE, ACTIVE
+    FROM dbo.CREATOR_APPLICATION
+    WHERE APPLICATIONID = @APPLICATIONID;
+END
+GO
+
+-- ------------------------------------------------------------
+-- USP_CREATOR_APP_ADMIN_LIST
+-- Search / status filter / sort for admin console.
+-- @STATUSFILTER: ALL | QUEUE | SUBMITTED | UNDER_REVIEW | REQUEST_INFO | APPROVED | REJECTED
+-- @SORTBY: SUBMITTEDAT | UPDATEDDATE | STATUS
+-- @SORTDIR: ASC | DESC
+-- ------------------------------------------------------------
+CREATE OR ALTER PROCEDURE [dbo].[USP_CREATOR_APP_ADMIN_LIST]
+(
+    @STATUSFILTER NVARCHAR(30)  = N'QUEUE',
+    @SEARCH       NVARCHAR(200) = NULL,
+    @SORTBY       NVARCHAR(30)  = N'SUBMITTEDAT',
+    @SORTDIR      NVARCHAR(4)   = N'ASC',
+    @PAGESIZE     INT           = 20,
+    @PAGENUMBER   INT           = 1
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF @PAGESIZE IS NULL OR @PAGESIZE < 1 SET @PAGESIZE = 20;
+    IF @PAGESIZE > 100 SET @PAGESIZE = 100;
+    IF @PAGENUMBER IS NULL OR @PAGENUMBER < 1 SET @PAGENUMBER = 1;
+
+    SET @STATUSFILTER = UPPER(LTRIM(RTRIM(ISNULL(@STATUSFILTER, N'QUEUE'))));
+    SET @SORTBY = UPPER(LTRIM(RTRIM(ISNULL(@SORTBY, N'SUBMITTEDAT'))));
+    SET @SORTDIR = UPPER(LTRIM(RTRIM(ISNULL(@SORTDIR, N'ASC'))));
+    IF @SORTDIR NOT IN (N'ASC', N'DESC') SET @SORTDIR = N'ASC';
+    IF @SORTBY NOT IN (N'SUBMITTEDAT', N'UPDATEDDATE', N'STATUS') SET @SORTBY = N'SUBMITTEDAT';
+
+    DECLARE @OFFSET INT = (@PAGENUMBER - 1) * @PAGESIZE;
+    DECLARE @Q NVARCHAR(200) = NULLIF(LTRIM(RTRIM(@SEARCH)), N'');
+
+    ;WITH Base AS (
+        SELECT
+            APPLICATIONID, USERID, STATUS, DISPLAYNAMEPREF, BIODRAFT,
+            MOTIVATION, SAMPLEOUTLINE, PORTFOLIOLINKS, AGREEMENTACCEPTED,
+            AUTOELIGIBILITYJSON, REVIEWEDBYUSERID, REVIEWEDAT, REVIEWNOTE,
+            REJECTIONREASON, SUBMITTEDAT, CREATEDDATE, UPDATEDDATE, ACTIVE
+        FROM dbo.CREATOR_APPLICATION
+        WHERE ACTIVE = 1
+          AND (
+                (@STATUSFILTER = N'ALL')
+             OR (@STATUSFILTER = N'QUEUE' AND STATUS IN (N'SUBMITTED', N'UNDER_REVIEW', N'REQUEST_INFO'))
+             OR (STATUS = @STATUSFILTER)
+          )
+          AND (
+                @Q IS NULL
+             OR DISPLAYNAMEPREF LIKE N'%' + @Q + N'%'
+             OR CAST(USERID AS NVARCHAR(30)) LIKE N'%' + @Q + N'%'
+             OR MOTIVATION LIKE N'%' + @Q + N'%'
+          )
+    )
+    SELECT
+        COUNT(*) OVER() AS TOTALCOUNT,
+        APPLICATIONID, USERID, STATUS, DISPLAYNAMEPREF, BIODRAFT,
+        MOTIVATION, SAMPLEOUTLINE, PORTFOLIOLINKS, AGREEMENTACCEPTED,
+        AUTOELIGIBILITYJSON, REVIEWEDBYUSERID, REVIEWEDAT, REVIEWNOTE,
+        REJECTIONREASON, SUBMITTEDAT, CREATEDDATE, UPDATEDDATE, ACTIVE
+    FROM Base
+    ORDER BY
+        CASE WHEN @SORTBY = N'SUBMITTEDAT' AND @SORTDIR = N'ASC'
+             THEN COALESCE(SUBMITTEDAT, CREATEDDATE) END ASC,
+        CASE WHEN @SORTBY = N'SUBMITTEDAT' AND @SORTDIR = N'DESC'
+             THEN COALESCE(SUBMITTEDAT, CREATEDDATE) END DESC,
+        CASE WHEN @SORTBY = N'UPDATEDDATE' AND @SORTDIR = N'ASC'
+             THEN UPDATEDDATE END ASC,
+        CASE WHEN @SORTBY = N'UPDATEDDATE' AND @SORTDIR = N'DESC'
+             THEN UPDATEDDATE END DESC,
+        CASE WHEN @SORTBY = N'STATUS' AND @SORTDIR = N'ASC'
+             THEN STATUS END ASC,
+        CASE WHEN @SORTBY = N'STATUS' AND @SORTDIR = N'DESC'
+             THEN STATUS END DESC,
+        APPLICATIONID DESC
+    OFFSET @OFFSET ROWS FETCH NEXT @PAGESIZE ROWS ONLY;
+END
+GO
+
+-- ------------------------------------------------------------
+-- USP_CREATOR_APP_REVIEW — allow decide from REQUEST_INFO too
+-- (user may update draft without re-submit; admin can still act)
+-- ------------------------------------------------------------
+CREATE OR ALTER PROCEDURE [dbo].[USP_CREATOR_APP_REVIEW]
+(
+    @APPLICATIONID     BIGINT,
+    @ACTION            NVARCHAR(20),
+    @REVIEWEDBYUSERID  BIGINT,
+    @REVIEWNOTE        NVARCHAR(2000) = NULL,
+    @REJECTIONREASON   NVARCHAR(2000) = NULL
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+        DECLARE @CURRENTSTATUS NVARCHAR(30);
+        DECLARE @APPUSERID BIGINT;
+        DECLARE @DISPLAYNAMEPREF NVARCHAR(100);
+        DECLARE @BIODRAFT NVARCHAR(2000);
+
+        SELECT
+            @CURRENTSTATUS = STATUS,
+            @APPUSERID = USERID,
+            @DISPLAYNAMEPREF = DISPLAYNAMEPREF,
+            @BIODRAFT = BIODRAFT
+        FROM dbo.CREATOR_APPLICATION
+        WHERE APPLICATIONID = @APPLICATIONID AND ACTIVE = 1;
+
+        IF @CURRENTSTATUS IS NULL
+        BEGIN
+            SELECT 0 AS SUCCESS, NULL AS STATUS, NULL AS USERID,
+                   'Application not found' AS MESSAGE;
+            RETURN;
+        END
+
+        IF @CURRENTSTATUS NOT IN (N'SUBMITTED', N'UNDER_REVIEW', N'REQUEST_INFO')
+        BEGIN
+            SELECT 0 AS SUCCESS, @CURRENTSTATUS AS STATUS, @APPUSERID AS USERID,
+                   'Application is not in a reviewable state' AS MESSAGE;
+            RETURN;
+        END
+
+        IF @ACTION NOT IN (N'APPROVE', N'REJECT', N'REQUEST_INFO')
+        BEGIN
+            SELECT 0 AS SUCCESS, @CURRENTSTATUS AS STATUS, @APPUSERID AS USERID,
+                   'Invalid action. Use APPROVE, REJECT, or REQUEST_INFO' AS MESSAGE;
+            RETURN;
+        END
+
+        IF @ACTION = N'REJECT' AND (NULLIF(LTRIM(RTRIM(@REJECTIONREASON)), N'') IS NULL)
+        BEGIN
+            SELECT 0 AS SUCCESS, @CURRENTSTATUS AS STATUS, @APPUSERID AS USERID,
+                   'Rejection reason is required' AS MESSAGE;
+            RETURN;
+        END
+
+        IF @ACTION = N'REQUEST_INFO' AND (NULLIF(LTRIM(RTRIM(@REVIEWNOTE)), N'') IS NULL)
+        BEGIN
+            SELECT 0 AS SUCCESS, @CURRENTSTATUS AS STATUS, @APPUSERID AS USERID,
+                   'A message is required when requesting more information' AS MESSAGE;
+            RETURN;
+        END
+
+        DECLARE @NEWSTATUS NVARCHAR(30);
+        SET @NEWSTATUS = CASE @ACTION
+            WHEN N'APPROVE'      THEN N'APPROVED'
+            WHEN N'REJECT'       THEN N'REJECTED'
+            WHEN N'REQUEST_INFO' THEN N'REQUEST_INFO'
+        END;
+
+        UPDATE dbo.CREATOR_APPLICATION
+        SET STATUS            = @NEWSTATUS,
+            REVIEWEDBYUSERID  = @REVIEWEDBYUSERID,
+            REVIEWEDAT        = SYSUTCDATETIME(),
+            REVIEWNOTE        = @REVIEWNOTE,
+            REJECTIONREASON   = CASE WHEN @ACTION = N'REJECT' THEN @REJECTIONREASON ELSE REJECTIONREASON END,
+            UPDATEDDATE       = SYSUTCDATETIME()
+        WHERE APPLICATIONID = @APPLICATIONID;
+
+        IF @ACTION = N'APPROVE'
+        BEGIN
+            DECLARE @DN NVARCHAR(100) =
+                NULLIF(LTRIM(RTRIM(@DISPLAYNAMEPREF)), N'');
+            IF @DN IS NULL
+                SET @DN = N'Creator ' + CAST(@APPUSERID AS NVARCHAR(30));
+
+            IF EXISTS (SELECT 1 FROM dbo.CREATOR_PROFILE WHERE USERID = @APPUSERID)
+            BEGIN
+                UPDATE dbo.CREATOR_PROFILE
+                SET DISPLAYNAME = CASE
+                        WHEN DISPLAYNAME IS NULL OR LTRIM(RTRIM(DISPLAYNAME)) = N''
+                        THEN @DN ELSE DISPLAYNAME
+                    END,
+                    BIO = CASE
+                        WHEN (BIO IS NULL OR LTRIM(RTRIM(BIO)) = N'')
+                             AND @BIODRAFT IS NOT NULL
+                        THEN @BIODRAFT ELSE BIO
+                    END,
+                    PROFILESTATUS = N'ACTIVE',
+                    UPDATEDDATE = SYSUTCDATETIME()
+                WHERE USERID = @APPUSERID;
+            END
+            ELSE
+            BEGIN
+                INSERT INTO dbo.CREATOR_PROFILE
+                (
+                    USERID, DISPLAYNAME, BIO, EXPERTISETAGS, PUBLICEMAIL,
+                    AVATARFILEUUID, COVERFILEUUID, WEBSITEURL,
+                    PROFILESTATUS, CREATEDDATE, UPDATEDDATE
+                )
+                VALUES
+                (
+                    @APPUSERID, @DN, @BIODRAFT, NULL, NULL,
+                    NULL, NULL, NULL,
+                    N'ACTIVE', SYSUTCDATETIME(), SYSUTCDATETIME()
+                );
+            END
+        END
+
+        SELECT 1 AS SUCCESS, @NEWSTATUS AS STATUS, @APPUSERID AS USERID,
+               'Review action applied' AS MESSAGE;
+    END TRY
+    BEGIN CATCH
+        SELECT 0 AS SUCCESS, NULL AS STATUS, NULL AS USERID, ERROR_MESSAGE() AS MESSAGE;
+    END CATCH
+END
+GO
+
+-- ------------------------------------------------------------
+-- USP_CREATOR_ADMIN_CREATORS_LIST
+-- Approved creators with profile fields for Admin “Creator Users”.
+-- ------------------------------------------------------------
+CREATE OR ALTER PROCEDURE [dbo].[USP_CREATOR_ADMIN_CREATORS_LIST]
+(
+    @SEARCH     NVARCHAR(200) = NULL,
+    @SORTBY     NVARCHAR(30)  = N'REVIEWEDAT',
+    @SORTDIR    NVARCHAR(4)   = N'DESC',
+    @PAGESIZE   INT           = 20,
+    @PAGENUMBER INT           = 1
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF @PAGESIZE IS NULL OR @PAGESIZE < 1 SET @PAGESIZE = 20;
+    IF @PAGESIZE > 100 SET @PAGESIZE = 100;
+    IF @PAGENUMBER IS NULL OR @PAGENUMBER < 1 SET @PAGENUMBER = 1;
+
+    SET @SORTBY = UPPER(LTRIM(RTRIM(ISNULL(@SORTBY, N'REVIEWEDAT'))));
+    SET @SORTDIR = UPPER(LTRIM(RTRIM(ISNULL(@SORTDIR, N'DESC'))));
+    IF @SORTDIR NOT IN (N'ASC', N'DESC') SET @SORTDIR = N'DESC';
+    IF @SORTBY NOT IN (N'REVIEWEDAT', N'DISPLAYNAME', N'UPDATEDDATE', N'SUBMITTEDAT')
+        SET @SORTBY = N'REVIEWEDAT';
+
+    DECLARE @OFFSET INT = (@PAGENUMBER - 1) * @PAGESIZE;
+    DECLARE @Q NVARCHAR(200) = NULLIF(LTRIM(RTRIM(@SEARCH)), N'');
+
+    ;WITH Base AS (
+        SELECT
+            A.APPLICATIONID,
+            A.USERID,
+            A.STATUS,
+            A.DISPLAYNAMEPREF,
+            A.BIODRAFT,
+            A.MOTIVATION,
+            A.SAMPLEOUTLINE,
+            A.PORTFOLIOLINKS,
+            A.REVIEWEDBYUSERID,
+            A.REVIEWEDAT,
+            A.REVIEWNOTE,
+            A.SUBMITTEDAT,
+            A.CREATEDDATE,
+            A.UPDATEDDATE,
+            A.ACTIVE,
+            P.DISPLAYNAME AS PROFILEDISPLAYNAME,
+            P.BIO AS PROFILEBIO,
+            P.PUBLICEMAIL AS PROFILEPUBLICEMAIL,
+            P.PROFILESTATUS,
+            P.ISVERIFIEDBADGE,
+            P.UPDATEDDATE AS PROFILEUPDATEDDATE,
+            (
+                SELECT COUNT(1)
+                FROM dbo.STUDY_PLAN SP
+                WHERE SP.CREATORUSERID = A.USERID
+                  AND SP.PLANSTATUS NOT IN (N'ARCHIVED')
+            ) AS PLANCOUNT
+        FROM dbo.CREATOR_APPLICATION A
+        LEFT JOIN dbo.CREATOR_PROFILE P ON P.USERID = A.USERID
+        WHERE A.ACTIVE = 1
+          AND A.STATUS = N'APPROVED'
+          AND (
+                @Q IS NULL
+             OR A.DISPLAYNAMEPREF LIKE N'%' + @Q + N'%'
+             OR P.DISPLAYNAME LIKE N'%' + @Q + N'%'
+             OR CAST(A.USERID AS NVARCHAR(30)) LIKE N'%' + @Q + N'%'
+             OR P.PUBLICEMAIL LIKE N'%' + @Q + N'%'
+          )
+    )
+    SELECT
+        COUNT(*) OVER() AS TOTALCOUNT,
+        *
+    FROM Base
+    ORDER BY
+        CASE WHEN @SORTBY = N'REVIEWEDAT' AND @SORTDIR = N'ASC'
+             THEN COALESCE(REVIEWEDAT, SUBMITTEDAT) END ASC,
+        CASE WHEN @SORTBY = N'REVIEWEDAT' AND @SORTDIR = N'DESC'
+             THEN COALESCE(REVIEWEDAT, SUBMITTEDAT) END DESC,
+        CASE WHEN @SORTBY = N'DISPLAYNAME' AND @SORTDIR = N'ASC'
+             THEN COALESCE(PROFILEDISPLAYNAME, DISPLAYNAMEPREF) END ASC,
+        CASE WHEN @SORTBY = N'DISPLAYNAME' AND @SORTDIR = N'DESC'
+             THEN COALESCE(PROFILEDISPLAYNAME, DISPLAYNAMEPREF) END DESC,
+        CASE WHEN @SORTBY = N'UPDATEDDATE' AND @SORTDIR = N'ASC'
+             THEN UPDATEDDATE END ASC,
+        CASE WHEN @SORTBY = N'UPDATEDDATE' AND @SORTDIR = N'DESC'
+             THEN UPDATEDDATE END DESC,
+        CASE WHEN @SORTBY = N'SUBMITTEDAT' AND @SORTDIR = N'ASC'
+             THEN SUBMITTEDAT END ASC,
+        CASE WHEN @SORTBY = N'SUBMITTEDAT' AND @SORTDIR = N'DESC'
+             THEN SUBMITTEDAT END DESC,
+        APPLICATIONID DESC
+    OFFSET @OFFSET ROWS FETCH NEXT @PAGESIZE ROWS ONLY;
+END
+GO

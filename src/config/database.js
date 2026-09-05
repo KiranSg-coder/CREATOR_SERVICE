@@ -8,7 +8,7 @@ const DB_PORT = process.env.DB_PORT ? Number(process.env.DB_PORT) : undefined;
 
 const sequelize = new Sequelize(DB_NAME, DB_USER, DB_PASSWORD, {
   host: DB_HOST,
-  ...(DB_PORT ? { port: DB_PORT } : {}),
+  // ...(DB_PORT ? { port: DB_PORT } : {}),
   dialect: "mssql",
   logging: false,
   dialectOptions: {

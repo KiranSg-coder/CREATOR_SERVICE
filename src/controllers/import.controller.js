@@ -6,7 +6,7 @@ const { processImportBuffer } = require("../services/importRunner");
 const { importJobFromRow } = require("../lib/normalize");
 
 const FILE_DOCUMENT_BASE_URL =
-  process.env.FILE_DOCUMENT_BASE_URL || "http://localhost:6010";
+  process.env.FILE_DOCUMENT_BASE_URL || "http://localhost:6008";
 
 async function createJobRow(planId, userId, inputFileUuid) {
   const result = await sequelize.query(

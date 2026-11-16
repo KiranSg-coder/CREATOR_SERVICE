@@ -1,7 +1,10 @@
-require("dotenv").config();
+require("./config/loadEnv"); // Phase 1: APP_ENV-aware .env loader (LOCAL_/PROD_ blocks)
 const express = require("express");
+const requireServiceKey = require("./middleware/requireServiceKey"); // S5: fail-closed internal guard
 const cors = require("cors");
 const app = express();
+// S12: never send raw internal/SQL error text to clients outside development.
+app.use(require("./middleware/safeErrorResponses"));
 const sequelizeConnection = require("./config/database");
 
 const corsOrigin =
@@ -48,8 +51,8 @@ app.use("/me/plans", planRoutes);
 app.use("/me/plans", daySlotRoutes);
 app.use("/", importRoutes);
 app.use("/catalog", catalogRoutes);
-app.use("/internal/reports", reportRoutes);
-app.use("/internal/rollup", require("./routes/internal.routes"));
+app.use("/internal/reports", requireServiceKey, reportRoutes);
+app.use("/internal/rollup", requireServiceKey, require("./routes/internal.routes"));
 app.use("/health", healthRoutes);
 
 sequelizeConnection

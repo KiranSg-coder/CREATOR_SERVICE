@@ -1,10 +1,11 @@
-const INTERNAL_SERVICE_KEY = process.env.INTERNAL_SERVICE_KEY;
+// A7: shared dual-key, constant-time check (was a plain === against a value read at load time).
+const { isValidServiceKey } = require("../lib/serviceKey");
 const { resolveUserId, resolveTenantHeaders } = require("../lib/resolveUserContext");
 
 const extractUser = (req, res, next) => {
   const serviceKey = req.headers["x-service-key"];
 
-  if (INTERNAL_SERVICE_KEY && serviceKey === INTERNAL_SERVICE_KEY) {
+  if (isValidServiceKey(serviceKey)) {
     req.isInternal = true;
     const fallbackId = req.query.userId || req.body?.userId;
     if (fallbackId) req.userId = parseInt(fallbackId, 10);

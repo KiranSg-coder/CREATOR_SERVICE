@@ -1,41 +1,44 @@
+"use strict";
 const jwt = require("jsonwebtoken");
 
 /**
- * Identity resolution for a proxied request.
+ * Identity resolution for a request reaching this service (production review S4).
  *
- * ORDER MATTERS AND WAS PREVIOUSLY WRONG.
+ * 1. The signed bearer token is the ONLY source of a user's identity.
+ * 2. Identity headers (x-user-id and the tenant headers) are trusted ONLY on genuine
+ *    service-to-service calls that carry a valid x-service-key. A client — or anything that
+ *    can reach this service's port directly — can no longer act as another user by sending
+ *    `x-user-id`.
+ * 3. A malformed header never overrides or contradicts a valid token.
  *
- * This used to read `x-user-id` FIRST and only fall back to the bearer token
- * when that header was absent:
- *
- *     const fromHeader = req.headers["x-user-id"];
- *     if (fromHeader) return parseInt(String(fromHeader), 10);
- *
- * Two consequences:
- *
- *  1. CORRECTNESS — if the gateway ever forwarded a header that was present
- *     but not a number (notably the literal string "undefined", which
- *     `String(userId)` produces when a JWT lacks the claim), `parseInt` gave
- *     NaN and the service answered 401 "Missing user context" *even though the
- *     request carried a perfectly valid, signed token it could have read.*
- *     The user saw "Today's data unavailable / Missing user context" while
- *     other services that happened to get an intact header worked fine.
- *
- *  2. SECURITY — a plain header was the primary source of identity. Anything
- *     able to reach a service port directly could impersonate any user by
- *     setting `x-user-id`.
- *
- * The bearer token is signed and verifiable, so it is now the primary source.
- * The header is only a fallback, used for genuine service-to-service calls
- * that carry no user token. A malformed header can no longer cause a 401 for
- * an authenticated user, and it can no longer be used to assert an identity
- * that the token contradicts.
+ * Requires JWT_SECRET (same value as the API gateway) and INTERNAL_SERVICE_KEY for
+ * service-to-service calls. Without JWT_SECRET every user request is rejected (fail closed).
  */
+
+let warnedMissingSecret = false;
+
+function getJwtSecret() {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    if (!warnedMissingSecret) {
+      console.error(
+        "[auth] JWT_SECRET is not set — user requests to this service will be rejected (401).",
+      );
+      warnedMissingSecret = true;
+    }
+    return null;
+  }
+  return secret;
+}
+
+/** True only when the caller presents the shared internal service key (current or, during rotation, previous). */
+const { hasValidServiceKey } = require("./serviceKey");
+
 function decodeBearer(req) {
   const auth = req.headers.authorization || req.headers.Authorization;
   if (!auth || !String(auth).startsWith("Bearer ")) return null;
 
-  const secret = process.env.JWT_SECRET;
+  const secret = getJwtSecret();
   if (!secret) return null;
 
   try {
@@ -60,15 +63,15 @@ function resolveUserId(req) {
     if (fromToken) return fromToken;
   }
 
-  // 2. Gateway-injected header — only reachable for service-to-service traffic
-  //    or when the token carried no usable claim.
-  return toUserId(req.headers["x-user-id"]);
+  // 2. Identity header — only from an authenticated internal service.
+  if (hasValidServiceKey(req)) {
+    return toUserId(req.headers["x-user-id"]);
+  }
+  return null;
 }
 
 function resolveTenantHeaders(req) {
   const decoded = decodeBearer(req);
-
-  // Verified claims win; headers fill gaps.
   const fromToken = decoded
     ? {
         entityCode: decoded.entityCode ?? null,
@@ -78,12 +81,16 @@ function resolveTenantHeaders(req) {
       }
     : {};
 
+  // Headers may only fill gaps for authenticated internal calls.
+  const trustHeaders = hasValidServiceKey(req);
+  const header = (name) => (trustHeaders ? req.headers[name] || null : null);
+
   return {
-    entityCode: fromToken.entityCode || req.headers["x-entity-code"] || null,
-    companyCode: fromToken.companyCode || req.headers["x-company-code"] || null,
-    branchCode: fromToken.branchCode || req.headers["x-branch-code"] || null,
-    appCode: fromToken.appCode || req.headers["x-app-code"] || null,
+    entityCode: fromToken.entityCode || header("x-entity-code"),
+    companyCode: fromToken.companyCode || header("x-company-code"),
+    branchCode: fromToken.branchCode || header("x-branch-code"),
+    appCode: fromToken.appCode || header("x-app-code"),
   };
 }
 
-module.exports = { resolveUserId, resolveTenantHeaders, decodeBearer };
+module.exports = { resolveUserId, resolveTenantHeaders, decodeBearer, hasValidServiceKey };

@@ -1,81 +1,20 @@
+"use strict";
 /**
- * Gate platform admin analytics routes.
- * Same contract as SUBSCRIPTION_SERVICE requireAdminAnalytics.
+ * Gate platform admin analytics routes (production review S6).
+ *
+ * DEFAULT DENY. The caller's permissions are checked server-side against the
+ * Authorization service using their verified token. Client headers such as
+ * x-is-admin / x-permissions / x-roles are ignored, and the old
+ * ADMIN_ANALYTICS_OPEN fallback (which let any signed-in user through) is removed.
+ * Internal service calls (req.isInternal, set only after a valid x-service-key) pass.
  */
+const { requireAnyPermission } = require("../lib/authzPermissions");
 
-const ALLOWED_CODES = new Set([
+const ADMIN_ANALYTICS_CODES = [
   "TENANT_USER_ADMIN",
   "AUTHZ.ANALYTICS.VIEW",
   "AUTHZ.ROLE.VIEW",
-]);
+];
 
-function splitHeader(value) {
-  if (value == null || value === "") return [];
-  return String(value)
-    .split(/[,\s]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-function collectCodes(req) {
-  return [
-    ...splitHeader(req.headers["x-permission-codes"]),
-    ...splitHeader(req.headers["x-permissions"]),
-    ...splitHeader(req.headers["x-roles"]),
-  ];
-}
-
-function hasAdminAnalyticsPermission(req) {
-  if (req.headers["x-is-admin"] === "1") return true;
-  return collectCodes(req).some((c) => ALLOWED_CODES.has(c));
-}
-
-function hasPermissionHeaders(req) {
-  return (
-    Boolean(req.headers["x-permission-codes"]) ||
-    Boolean(req.headers["x-permissions"]) ||
-    Boolean(req.headers["x-roles"]) ||
-    req.headers["x-is-admin"] != null
-  );
-}
-
-const requireAdminAnalytics = (req, res, next) => {
-  if (req.isInternal) {
-    return next();
-  }
-
-  if (!req.userId) {
-    return res.status(401).json({
-      success: false,
-      message: "Missing user context",
-    });
-  }
-
-  if (hasAdminAnalyticsPermission(req)) {
-    return next();
-  }
-
-  const openFallback = process.env.ADMIN_ANALYTICS_OPEN !== "false";
-
-  if (hasPermissionHeaders(req)) {
-    return res.status(403).json({
-      success: false,
-      message: "Admin analytics permission required",
-    });
-  }
-
-  if (openFallback) {
-    console.warn(
-      "[requireAdminAnalytics] Allowing authenticated user without admin permission headers " +
-        `(userId=${req.userId}). Set ADMIN_ANALYTICS_OPEN=false to enforce.`
-    );
-    return next();
-  }
-
-  return res.status(403).json({
-    success: false,
-    message: "Admin analytics permission required",
-  });
-};
-
-module.exports = requireAdminAnalytics;
+module.exports = requireAnyPermission(ADMIN_ANALYTICS_CODES, "Admin analytics permission");
+module.exports.ADMIN_ANALYTICS_CODES = ADMIN_ANALYTICS_CODES;
